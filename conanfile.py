@@ -36,6 +36,7 @@ class BoostConan(ConanFile):
     license = "Boost Software License - Version 1.0. http://www.boost.org/LICENSE_1_0.txt"
     short_paths = True
     no_copy_source = False
+    exports = "*.patch"
 
     def config_options(self):
         if self.settings.compiler == "Visual Studio":
@@ -68,6 +69,16 @@ class BoostConan(ConanFile):
         zip_name = "%s%s" % (self.folder_name, extension)
         url = "https://dl.bintray.com/boostorg/release/%s/source/%s" % (self.version, zip_name)
         tools.get(url, sha256=sha256)
+
+        with tools.chdir(os.path.join(self.source_folder, self.folder_name)):
+            from glob import glob
+            for patch in glob(os.path.join(self.source_folder,
+                                           'patches',
+                                           self.version,
+                                           '*.patch')):
+                patch_cmd = "git apply -p 1 --directory tools/build {}".format(patch)
+                self.output.info(patch_cmd)
+                self.run(patch_cmd)
 
     ##################### BUILDING METHODS ###########################
 
