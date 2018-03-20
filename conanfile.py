@@ -25,11 +25,16 @@ class BoostConan(ConanFile):
     options = {
         "shared": [True, False],
         "header_only": [True, False],
-        "fPIC": [True, False]
+        "fPIC": [True, False],
+        "tests": [True, False]
     }
     options.update({"without_%s" % libname: [True, False] for libname in lib_list})
-
-    default_options = ["shared=False", "header_only=False", "fPIC=False"]
+    default_options = [
+        "shared=False",
+        "header_only=False",
+        "fPIC=False",
+        "tests=False"
+    ]
     default_options.extend(["without_%s=False" % libname for libname in lib_list if libname != "python"])
     default_options.append("without_python=True")
     default_options = tuple(default_options)
@@ -84,6 +89,29 @@ class BoostConan(ConanFile):
 
     ##################### BUILDING METHODS ###########################
 
+    def buildable_libs(self, boost_root):
+        try:
+            from os import scandir
+        except ImportError:
+            from scandir import scandir
+        lib_dirs = list()
+        libs_dir = os.path.join(boost_root, 'libs')
+        for entry in scandir(libs_dir):
+            if entry.is_dir():
+                lib_dirs.append(entry.name)
+        return lib_dirs
+
+    def testable_libs(self, boost_root):
+        testables = list()
+        lib_dirs = self.buildable_libs(boost_root)
+        for lib in lib_dirs:
+            jamfile_path = os.path.join(boost_root, 'libs', lib, 'test')
+            jamfile_names = ['Jamfile', 'Jamfile.v2']
+            for f in [os.path.join(jamfile_path, jamfile_name) for jamfile_name in jamfile_names]:
+                if os.path.exists(f) and os.path.isfile(f):
+                    testables.append(lib)
+        return testables
+
     def _parse_logs(self, logfile):
         parser = logs.BjamLogsParser(logfile)
         parser.parse()
@@ -133,6 +161,17 @@ class BoostConan(ConanFile):
                     # To show the libraries *1
                     # self.run("%s --show-libraries" % b2_exe)
                     self._run_command(full_command, build_logfile)
+
+                    # Tests
+                    if self.options.tests:
+                        testables = sorted(self.testable_libs(sources))
+                        self.output.info("[TESTS] testable libraries: {}".format(' '.join(testables)))
+                        for testable in testables:
+                            test_dir = os.path.join(sources, 'libs', testable, 'test')
+                            with tools.chdir(test_dir):
+                                test_logfile = os.path.join(logs_dir,
+                                                       "unittests_" + testable + ".log")
+                                self._run_command(full_command, test_logfile, stoponfailure=False, verbose=False)
 
     def get_build_flags(self):
 
