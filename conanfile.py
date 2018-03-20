@@ -1,6 +1,8 @@
 from conans import ConanFile
 from conans import tools
+from conans.errors import ConanException
 import os
+from boosthelpers import logs
 
 # From from *1 (see below, b2 --show-libraries), also ordered following linkage order
 # see https://github.com/Kitware/CMake/blob/master/Modules/FindBoost.cmake to know the order
@@ -36,7 +38,7 @@ class BoostConan(ConanFile):
     license = "Boost Software License - Version 1.0. http://www.boost.org/LICENSE_1_0.txt"
     short_paths = True
     no_copy_source = False
-    exports = "*.patch"
+    exports = "*.patch", "boosthelpers/*.py"
 
     def config_options(self):
         if self.settings.compiler == "Visual Studio":
@@ -82,10 +84,35 @@ class BoostConan(ConanFile):
 
     ##################### BUILDING METHODS ###########################
 
+    def _parse_logs(self, logfile):
+        parser = logs.BjamLogsParser(logfile)
+        parser.parse()
+        logformatter = logs.BJamLogsReportFormatter()
+        logformatter.format(parser.summary)
+
+    def _run_command(self, command, logfile, stoponfailure=True, parselogs=True, verbose=True):
+        try:
+            self.output.info(command)
+            if verbose and os.name == "posix":
+                self.run(command + " 2>&1 | tee {}".format(logfile))
+            else:
+                self.run(command + " >{} 2>&1".format(logfile))
+        except ConanException as e:
+            if stoponfailure:
+                raise e
+        finally:
+            if parselogs:
+                self._parse_logs(logfile)
+
     def build(self):
         if self.options.header_only:
             self.output.warn("Header only package, skipping build")
             return
+
+        # Logs
+        logs_dir = os.path.join(self.build_folder, 'logs')
+        tools.mkdir(logs_dir)
+        build_logfile = os.path.join(logs_dir, "build.log")
 
         b2_exe = self.bootstrap()
         flags = self.get_build_flags()
@@ -98,7 +125,6 @@ class BoostConan(ConanFile):
         # -d2 is to print more debug info and avoid travis timing out without output
         sources = os.path.join(self.source_folder, self.folder_name)
         full_command += ' --debug-configuration --build-dir="%s"' % self.build_folder
-        self.output.warn(full_command)
 
         with tools.vcvars(self.settings) if self.settings.compiler == "Visual Studio" else tools.no_op():
             with tools.chdir(sources):
@@ -106,7 +132,7 @@ class BoostConan(ConanFile):
                 with tools.environment_append({"BOOST_BUILD_PATH": self.build_folder}):
                     # To show the libraries *1
                     # self.run("%s --show-libraries" % b2_exe)
-                    self.run(full_command)
+                    self._run_command(full_command, build_logfile)
 
     def get_build_flags(self):
 
