@@ -13,6 +13,23 @@ lib_list = ['math', 'wave', 'container', 'exception', 'graph', 'iostreams', 'loc
             'atomic', 'filesystem', 'system', 'graph_parallel', 'python',
             'stacktrace', 'test', 'type_erasure']
 
+header_only_list = ['accumulators', 'algorithm', 'align', 'any', 'array', 'asio', 'assert',
+                    'assign', 'beast', 'bimap', 'bind', 'callable_traits', 'circular_buffer',
+                    'compatibility', 'compute', 'concept_check', 'config', 'conversion',
+                    'convert', 'core', 'coroutine2', 'crc', 'detail', 'disjoint_sets', 'dll',
+                    'dynamic_bitset', 'endian', 'flyweight', 'foreach', 'format', 'function',
+                    'function_types', 'functional', 'fusion', 'geometry', 'gil', 'hana',
+                    'heap', 'icl', 'integer', 'interprocess', 'intrusive', 'io', 'iterator',
+                    'lambda', 'lexical_cast', 'libraries.htm', 'local_function', 'lockfree',
+                    'logic', 'metaparse', 'move', 'mp11', 'mpl', 'msm', 'multi_array',
+                    'multi_index', 'multiprecision', 'numeric', 'optional', 'parameter',
+                    'phoenix', 'poly_collection', 'polygon', 'pool', 'predef', 'preprocessor',
+                    'process', 'property_map', 'property_tree', 'proto', 'ptr_container',
+                    'qvm', 'range', 'ratio', 'rational', 'scope_exit', 'signals2', 'smart_ptr',
+                    'sort', 'spirit', 'statechart', 'static_assert', 'throw_exception',
+                    'tokenizer', 'tti', 'tuple', 'type_index', 'type_traits', 'typeof', 'units',
+                    'unordered', 'utility', 'uuid', 'variant', 'vmd', 'winapi', 'xpressive']
+
 
 class BoostConan(ConanFile):
     name = "boost"
@@ -26,16 +43,27 @@ class BoostConan(ConanFile):
         "shared": [True, False],
         "header_only": [True, False],
         "fPIC": [True, False],
-        "tests": [True, False]
+        "tests": [True, False],
+        "privatize": [True, False],
+        "privatization_namespace": [True, False],
+        "privatization_namespace_name": "ANY",
+        "privatization_namespace_alias": [True, False]
     }
     options.update({"without_%s" % libname: [True, False] for libname in lib_list})
+    options.update({"without_%s" % libname: [True, False] for libname in header_only_list})
+
     default_options = [
         "shared=False",
         "header_only=False",
         "fPIC=False",
-        "tests=False"
+        "tests=False",
+        "privatize=False",
+        "privatization_namespace=False",
+        "privatization_namespace_name=priv",
+        "privatization_namespace_alias=True"
     ]
     default_options.extend(["without_%s=False" % libname for libname in lib_list if libname != "python"])
+    default_options.extend(["without_%s=False" % libname for libname in header_only_list])
     default_options.append("without_python=True")
     default_options = tuple(default_options)
 
@@ -48,6 +76,11 @@ class BoostConan(ConanFile):
     def config_options(self):
         if self.settings.compiler == "Visual Studio":
             self.options.remove("fPIC")
+
+        if self.options.privatize and self.options.privatization_namespace:
+            if not str(self.options.privatization_namespace_name).isalnum():
+                raise Exception("{} cannot be used as namespace for the privatization".format(self.options.privatization_namespace_name))
+
 
     @property
     def zip_bzip2_requires_needed(self):
@@ -141,17 +174,29 @@ class BoostConan(ConanFile):
         logs_dir = os.path.join(self.build_folder, 'logs')
         tools.mkdir(logs_dir)
         build_logfile = os.path.join(logs_dir, "build.log")
+        priv_logfile = os.path.join(logs_dir, "privatization.log")
 
         b2_exe = self.bootstrap()
-        flags = self.get_build_flags()
         # Help locating bzip2 and zlib
         self.create_user_config_jam(self.build_folder)
 
+        sources = os.path.join(self.source_folder, self.folder_name)
+        # Privatize
+        if self.options.privatize:
+            priv_dir = os.path.join(sources, "privatization")
+            self.privatize(bcp_exe=self.bootstrap_bcp(b2=b2_exe),
+                           boost_root=sources,
+                           libraries=sorted(header_only_list + lib_list),
+                           priv_dir=priv_dir,
+                           logfile=priv_logfile)
+            # use privatized sources for the remaining tasks
+            sources = priv_dir
+
         # JOIN ALL FLAGS
+        flags = self.get_build_flags()
         b2_flags = " ".join(flags)
         full_command = "%s %s -j%s --abbreviate-paths -d2" % (b2_exe, b2_flags, tools.cpu_count())
         # -d2 is to print more debug info and avoid travis timing out without output
-        sources = os.path.join(self.source_folder, self.folder_name)
         full_command += ' --debug-configuration --build-dir="%s"' % self.build_folder
 
         with tools.vcvars(self.settings) if self.settings.compiler == "Visual Studio" else tools.no_op():
@@ -172,6 +217,27 @@ class BoostConan(ConanFile):
                                 test_logfile = os.path.join(logs_dir,
                                                        "unittests_" + testable + ".log")
                                 self._run_command(full_command, test_logfile, stoponfailure=False, verbose=False)
+
+    def privatize(self, bcp_exe, boost_root, libraries, priv_dir, logfile):
+        tools.mkdir(priv_dir)
+        libraries[:] = [l for l in libraries if not getattr(self.options, "without_%s" % l)]
+        priv_libraries = ' '.join(libraries)
+        self.output.info("[privatization] privatized components:\n{}".format(priv_libraries))
+        arg_namespace = ''
+        arg_alias = ''
+        if self.options.privatization_namespace:
+            arg_namespace = "--namespace={}".format(self.options.privatization_namespace_name)
+            if self.options.privatization_namespace_alias:
+                arg_alias = "--namespace-alias"
+        cmd = "{bcp} {namespace} {alias} {libraries} "\
+              "build bootstrap.bat bootstrap.sh boostcpp.jam boost-build.jam "\
+              "config tools/inspect {priv_dir} ".format(bcp=bcp_exe,
+                                                        namespace=arg_namespace,
+                                                        alias=arg_alias,
+                                                        libraries=priv_libraries,
+                                                        priv_dir=priv_dir)
+        with tools.chdir(boost_root):
+            self._run_command(cmd, logfile, stoponfailure=True, parselogs=False)
 
     def get_build_flags(self):
 
@@ -196,9 +262,10 @@ class BoostConan(ConanFile):
         flags.append("link=%s" % ("static" if not self.options.shared else "shared"))
         flags.append("variant=%s" % str(self.settings.build_type).lower())
 
-        for libname in lib_list:
-            if getattr(self.options, "without_%s" % libname):
-                flags.append("--without-%s" % libname)
+        if not self.options.privatize:
+            for libname in lib_list:
+                if getattr(self.options, "without_%s" % libname):
+                    flags.append("--without-%s" % libname)
 
         # CXX FLAGS
         cxx_flags = []
@@ -359,13 +426,33 @@ class BoostConan(ConanFile):
             raise
         return os.path.join(folder, "b2.exe") if tools.os_info.is_windows else os.path.join(folder, "b2")
 
+    def bootstrap_bcp(self, b2):
+        flags = []
+        toolset = self.get_toolset_version_and_exe()[0]
+        flags.append('toolset={}'.format(toolset))
+        boost_root = os.path.join(self.source_folder, self.folder_name)
+        folder = os.path.join(boost_root, "tools", "bcp")
+        try:
+            with tools.chdir(folder):
+                self.output.info("[privatization] building bcp")
+                cmd = "%s %s -j%s --abbreviate-paths -d2" % (b2, " ".join(flags), tools.cpu_count())
+                self.output.info(cmd)
+                self.run(cmd)
+        except Exception as exc:
+            self.output.warn(str(exc))
+            raise
+        bcp_exe = os.path.join(boost_root, 'dist', 'bin', 'bcp.exe' if tools.os_info.is_windows else 'bcp')
+        self.output.info("bcp_exe: {}".format(bcp_exe))
+        return bcp_exe
+
     ####################################################################
 
     def package(self):
         # This stage/lib is in source_folder... Face palm, looks like it builds in build but then
         # copy to source with the good lib name
-        out_lib_dir = os.path.join(self.folder_name, "stage", "lib")
-        self.copy(pattern="*", dst="include/boost", src="%s/boost" % self.folder_name)
+        boost_root = os.path.join(self.folder_name, "privatization") if self.options.privatize else self.folder_name
+        out_lib_dir = os.path.join(boost_root, "stage", "lib")
+        self.copy(pattern="*", dst="include/boost", src="%s/boost" % boost_root)
         if not self.options.shared:
             self.copy(pattern="*.a", dst="lib", src=out_lib_dir, keep_path=False)
         self.copy(pattern="*.so", dst="lib", src=out_lib_dir, keep_path=False, symlinks=True)
